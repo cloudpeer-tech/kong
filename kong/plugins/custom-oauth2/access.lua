@@ -1,7 +1,7 @@
 local url = require "socket.url"
 local constants = require "kong.constants"
 local timestamp = require "kong.tools.timestamp"
-local secret = require "kong.plugins.oauth2.secret"
+local secret = require "kong.plugins.custom-oauth2.secret"
 
 
 local sha256_base64url = require "kong.tools.sha256".sha256_base64url
