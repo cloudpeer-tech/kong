@@ -145,8 +145,7 @@ local function generate_token(conf, service, credential, authenticated_userid,
     token_type = "bearer",
     expires_in = token_expiration > 0 and token.expires_in or nil,
     refresh_token = refresh_token,
-    state = state, -- If state is nil, this value won't be added
-    scope = scope
+    state = state -- If state is nil, this value won't be added
   }
 end
 
@@ -202,7 +201,7 @@ local function retrieve_scope(parameters, conf)
     end
 
     for v in scope:gmatch("%S+") do
-      if not table_contains(conf.scopes, v) then  -- scope yerine v kullanıldı
+      if not table_contains(conf.scopes, v) then
         return nil, {[ERROR] = "invalid_scope", error_description = "\"" .. v .. "\" is an invalid " .. SCOPE}
       else
         table.insert(scopes, v)
@@ -213,15 +212,9 @@ local function retrieve_scope(parameters, conf)
     return nil, {[ERROR] = "invalid_scope", error_description = "You must specify a " .. SCOPE}
   end
 
-  if scope and not conf.scopes then
-    return scope
-  end
-
   if #scopes > 0 then
     return table.concat(scopes, " ")
-  end
-
-  return scope
+  end -- else return nil
 end
 
 local function retrieve_code_challenge(parameters)
@@ -283,14 +276,14 @@ local function authorize(conf)
   else
     if conf.provision_key ~= parameters.provision_key then
       response_params = {
-        [ERROR] = "invalid_request",
-        error_description = "Missing or duplicate parameters"
+        [ERROR] = "invalid_provision_key",
+        error_description = "Invalid provision_key"
       }
 
     elseif not parameters.authenticated_userid or strip(parameters.authenticated_userid) == "" then
       response_params = {
-        [ERROR] = "invalid_request",
-        error_description = "Missing or duplicate parameters"
+        [ERROR] = "invalid_authenticated_userid",
+        error_description = "Missing authenticated_userid parameter"
       }
 
     else
@@ -317,8 +310,8 @@ local function authorize(conf)
 
       if not allowed_redirect_uris then
         response_params = {
-          [ERROR] = "invalid_request",
-          error_description = "Missing or duplicate parameters"
+          [ERROR] = "invalid_client",
+          error_description = "Invalid client authentication"
         }
 
       else
@@ -502,7 +495,7 @@ local function validate_pkce_verifier(parameters, auth_code)
   then
     return {
       [ERROR] = "invalid_grant",
-      error_description = "The given grant is invalid"
+      error_description = "Invalid " .. CODE
     }
   end
 
@@ -532,8 +525,8 @@ local function issue_token(conf)
              grant_type == GRANT_CLIENT_CREDENTIALS) or
             (conf.enable_password_grant and grant_type == GRANT_PASSWORD)) then
       response_params = {
-         [ERROR] = "invalid_grant",
-         error_description = "The given grant is invalid"
+        [ERROR] = "unsupported_grant_type",
+        error_description = "Invalid " .. GRANT_TYPE
       }
     end
 
@@ -551,14 +544,16 @@ local function issue_token(conf)
         if not table_contains(allowed_redirect_uris, redirect_uri) then
           response_params = {
             [ERROR] = "invalid_request",
-            error_description = "Missing or duplicate parameters"
+            error_description = "Invalid " .. REDIRECT_URI .. " that does " ..
+              "not match with any redirect_uri created "  ..
+              "with the application"
           }
         end
 
       else
         response_params = {
-          [ERROR] = "invalid_request",
-          error_description = "Missing or duplicate parameters"
+          [ERROR] = "invalid_client",
+          error_description = "Invalid client authentication"
         }
 
         if from_authorization_header then
@@ -593,8 +588,8 @@ local function issue_token(conf)
 
         if not authenticated then
           response_params = {
-            [ERROR] = "invalid_request",
-          error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_client",
+            error_description = "Invalid client authentication"
           }
 
           if from_authorization_header then
@@ -607,8 +602,8 @@ local function issue_token(conf)
 
       elseif client.client_type == CLIENT_TYPE_PUBLIC and strip(client_secret) ~= "" then
         response_params = {
-           [ERROR] = "invalid_request",
-           error_description = "Missing or duplicate parameters"
+          [ERROR] = "invalid_request",
+          error_description = "client_secret is disallowed for " .. CLIENT_TYPE_PUBLIC .. " clients"
         }
       end
     end
@@ -626,13 +621,13 @@ local function issue_token(conf)
           code and kong.db.oauth2_authorization_codes:select_by_code(code)
         if not auth_code or (service_id and service_id ~= auth_code.service.id) then
           response_params = {
-             [ERROR] = "invalid_request",
-             error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_request",
+            error_description = "Invalid " .. CODE
           }
         elseif auth_code.credential.id ~= client.id then
           response_params = {
             [ERROR] = "invalid_request",
-            error_description = "Missing or duplicate parameters"
+            error_description = "Invalid " .. CODE
           }
         end
 
@@ -651,7 +646,7 @@ local function issue_token(conf)
              (kong.plugin.get_id() ~= auth_code.plugin.id) then
             response_params = {
               [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+              error_description = "Invalid " .. CODE
             }
           end
         end
@@ -661,13 +656,13 @@ local function issue_token(conf)
           then
             response_params = {
               [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+              error_description = "Invalid " .. CODE
             }
 
           elseif auth_code.credential.id ~= client.id then
             response_params = {
               [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+              error_description = "Invalid " .. CODE
             }
 
           else
@@ -686,14 +681,14 @@ local function issue_token(conf)
         if parameters.authenticated_userid and
            conf.provision_key ~= parameters.provision_key then
           response_params = {
-             [ERROR] = "invalid_request",
-             error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_provision_key",
+            error_description = "Invalid provision_key"
           }
 
         elseif not client then
           response_params = {
-            [ERROR] = "invalid_request",
-            error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_client",
+            error_description = "Invalid client authentication"
           }
 
         else
@@ -713,19 +708,18 @@ local function issue_token(conf)
 
       elseif grant_type == GRANT_PASSWORD then
         -- Check that it comes from the right client
-        if conf.provision_key ~= parameters.password then
+        if conf.provision_key ~= parameters.provision_key then
           response_params = {
-             [ERROR] = "invalid_request",
-             error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_provision_key",
+            error_description = "Invalid provision_key"
           }
-        
-        elseif not parameters.username or 
-               strip(parameters.username) == "" then
+
+        elseif not parameters.authenticated_userid or
+               strip(parameters.authenticated_userid) == "" then
           response_params = {
-             [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_authenticated_userid",
+            error_description = "Missing authenticated_userid parameter"
           }
-        
 
         else
           -- Check scopes
@@ -755,19 +749,32 @@ local function issue_token(conf)
 
         if not token or (service_id and service_id ~= token.service.id) then
           response_params = {
-             [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+            [ERROR] = "invalid_request",
+            error_description = "Invalid " .. REFRESH_TOKEN
           }
 
         -- Check that the token belongs to the client application
         elseif token.credential.id ~= client.id then
             response_params = {
-              [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+              [ERROR] = "invalid_client",
+              error_description = "Invalid client authentication"
             }
 
         else
-         
+          -- Check scopes
+          if token.scope then
+            for scope in token.scope:gmatch("%S+") do
+              if not table_contains(conf.scopes, scope) then
+                response_params = {
+                  [ERROR] = "invalid_scope",
+                  error_description = "Scope mismatch",
+                }
+                break
+              end
+            end
+          end
+
+          if not response_params[ERROR] then
             response_params = generate_token(conf, kong.router.get_service(),
                                              client,
                                              token.authenticated_userid,
@@ -777,6 +784,7 @@ local function issue_token(conf)
               kong.db.oauth2_tokens:delete(token)
             end
           end
+        end
       end
     end
   end
@@ -816,9 +824,9 @@ local function retrieve_token(conf, access_token, realm)
   if not conf.global_credentials then
     if not token.service then
       return kong.response.exit(401, {
-        error = "Kimlik dogrulama ve yetkilendirme hatasi", 
-        ["error-code"] = "202", 
-        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        [ERROR] = "invalid_token",
+        error_description = "The access token is global, but the current " ..
+          "plugin is configured without 'global_credentials'",
       },
       {
         ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
@@ -953,9 +961,8 @@ local function do_authentication(conf)
     return nil, {
       status = 401,
       message = {
-        error = "Kimlik dogrulama ve yetkilendirme hatasi",
-        ["error-code"] = "202",
-        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        [ERROR] = "invalid_request",
+        error_description = "The access token is missing"
       },
       headers = {
         ["WWW-Authenticate"] = 'Bearer' .. realm
@@ -968,9 +975,8 @@ local function do_authentication(conf)
     return nil, {
       status = 401,
       message = {
-        error = "Kimlik dogrulama ve yetkilendirme hatasi",
-        ["error-code"] = "202",
-        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        [ERROR] = "invalid_token",
+        error_description = "The access token is invalid or has expired"
       },
       headers = {
         ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
@@ -987,9 +993,8 @@ local function do_authentication(conf)
     return nil, {
       status = 401,
       message = {
-        error = "Kimlik dogrulama ve yetkilendirme hatasi",
-        ["error-code"] = "202",
-        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        [ERROR] = "invalid_token",
+        error_description = "The access token is invalid or has expired"
       },
       headers = {
         ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
@@ -1006,9 +1011,8 @@ local function do_authentication(conf)
       return nil, {
         status = 401,
         message = {
-          error = "Kimlik dogrulama ve yetkilendirme hatasi",
-          ["error-code"] = "202",
-          error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+          [ERROR] = "invalid_token",
+          error_description = "The access token is invalid or has expired"
         },
         headers = {
           ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
@@ -1046,16 +1050,22 @@ local function do_authentication(conf)
 end
 
 local function invalid_oauth2_method(endpoint_name, realm)
-  return kong.response.exit(405, 
-  {
-    error = "invalid_method",
-    error_description = kong.request.get_method() .. " not permitted"
-  },
-  {
-    ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error="invalid_method" error_description="' ..
-                            kong.request.get_method() .. ' not permitted"'
-  }
-)
+  return {
+     status = 405,
+     message = {
+     [ERROR] = "invalid_method",
+       error_description = "The HTTP method " ..
+       kong.request.get_method() ..
+       " is invalid for the " .. endpoint_name .. " endpoint"
+     },
+     headers = {
+       ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
+                              '"invalid_method" error_description=' ..
+                              '"The HTTP method ' .. kong.request.get_method()
+                              .. ' is invalid for the ' ..
+                              endpoint_name .. ' endpoint"'
+     }
+   }
 end
 
 local function set_anonymous_consumer(anonymous)
@@ -1068,15 +1078,9 @@ local function set_anonymous_consumer(anonymous)
   end
 
   if not consumer then
-    ---local err_msg = "anonymous consumer " .. anonymous .. " is configured but doesn't exist"
-    ---kong.log.err(err_msg)
-
-    --return kong.response.error(500, err_msg)
-    local response_body = {
-      error = "invalid_request",
-      error_description = "The request failed due to some unknown reason"
-    }
-    return kong.response.exit(500, response_body)
+    local err_msg = "anonymous consumer " .. anonymous .. " is configured but doesn't exist"
+    kong.log.err(err_msg)
+    return kong.response.error(500, err_msg)
   end
 
   set_consumer(consumer)
@@ -1115,7 +1119,7 @@ function _M.execute(conf)
   local has_end_slash = string_byte(path, -1) == SLASH
 
   local realm = conf.realm and fmt(' realm="%s"', conf.realm) or ''
-  if string_find(path, "/auth/oauth/v2/token", has_end_slash and -22 or -21, true) then
+  if string_find(path, "/oauth2/token", has_end_slash and -14 or -13, true) then
     if kong.request.get_method() ~= "POST" then
       local err = invalid_oauth2_method("token", realm)
       return kong.response.exit(err.status, err.message, err.headers)

@@ -1,4 +1,4 @@
-local access = require "kong.plugins.custom-oauth2.access"
+local access = require "kong.plugins.oauth2.access"
 local kong_meta = require "kong.meta"
 
 

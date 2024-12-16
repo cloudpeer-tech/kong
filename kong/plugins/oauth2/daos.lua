@@ -1,6 +1,6 @@
 local url = require "socket.url"
 local typedefs = require "kong.db.schema.typedefs"
-local secret = require "kong.plugins.custom-oauth2.secret"
+local secret = require "kong.plugins.oauth2.secret"
 
 
 local assert = assert
