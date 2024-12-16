@@ -729,7 +729,7 @@ local function issue_token(conf)
 
         else
           -- Check scopes
-          local scope = "sss"  --err = retrieve_scope(parameters, conf)
+          local scope, err = retrieve_scope(parameters, conf)
           if err then
             -- If it's not ok, then this is the error message
             response_params = err
