@@ -114,7 +114,7 @@
                                             #
                                             # Example: `0.25`, this accounts for 25% of all traces.
 
-
+plugins = bundled, custom-outh2, ige-oauth2
 #plugins = bundled               # Comma-separated list of plugins this node should load.
                                  # By default, only plugins bundled in official distributions
                                  # are loaded via the `bundled` keyword.
