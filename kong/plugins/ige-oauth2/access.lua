@@ -2,7 +2,9 @@ local url = require "socket.url"
 local constants = require "kong.constants"
 local timestamp = require "kong.tools.timestamp"
 local secret = require "kong.plugins.ige-oauth2.secret"
-
+local pgmoon = require "pgmoon"
+local http = require "resty.http"
+local cjson = require "cjson" 
 
 local sha256_base64url = require "kong.tools.sha256".sha256_base64url
 
@@ -122,10 +124,57 @@ local function generate_token(conf, service, credential, authenticated_userid,
     if not disable_refresh and token_expiration > 0 then
       refresh_token = random_string()
     end
+    local request_body = kong.request.get_body()
+    local httpc = http.new()
+    local url = conf.identity_url--"https://stage-ides-service.cloudpeer.com/v1/identity/identity-key" --userpassword
+    local body = {
+        application = request_body.username, 
+        apiKey = request_body.password,
+    }
+  
+    local json_body = cjson.encode(body)
+  
+    local res, err = httpc:request_uri(url, {
+        method = "POST",
+        body = json_body,
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Content-Length"] = #json_body,
+        }
+    })
+    if err then
+      return error(err)
+    end
+    if not res then
+        return kong.response.exit(500, { message = "The request failed due to some unknown reason", error = "invalid_request" })
+    end
+  
+    if res.status ~= 200  then
+      return kong.response.exit(401, {
+        error = "Kimlik dogrulama ve yetkilendirme hatasi", 
+        ["error-code"] = "202", 
+        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+      })
+  end
+    local response_body = res.body
+    local response_data, parse_err = cjson.decode(response_body)
+  
+    local token_access = token.access_token
+    local password_req = request_body.password
+  
+    local file_path = "/tmp/token_passwords.txt"--"/usr/local/kong/logs/token_passwords.txt"
+    local file, err = io.open(file_path, "a")
+    if not file then
+      kong.response.exit(500, { message = "The request failed due to some unknown reason", error = "invalid_request" })
+    
+    end
+  
+    file:write(token.access_token .. ":" .. password_req .. "\n")
+    file:close()
     token, err = kong.db.oauth2_tokens:insert({
       service = service_id and { id = service_id } or nil,
       credential = { id = credential.id },
-      authenticated_userid = authenticated_userid,
+      authenticated_userid =token_access,
       expires_in = token_expiration,
       refresh_token = refresh_token,
       scope = scope
@@ -136,9 +185,10 @@ local function generate_token(conf, service, credential, authenticated_userid,
     })
   end
 
-  if err then
-    return error(err)
-  end
+
+
+
+
 
   return {
     access_token = token.access_token,
@@ -935,6 +985,29 @@ local function set_consumer(consumer, credential, token)
 
   if token and token.scope then
     set_header("X-Authenticated-Scope", token.scope)
+    local headers = ngx.req.get_headers()
+    local authorization_header = headers["Authorization"]
+    local coming_token = authorization_header:match("Bearer%s+(.+)")
+    if not coming_token then
+      return kong.response.exit(400,{
+        [ERROR] = "invalid_request",
+        error_description = "Missing or duplicate parameters"
+      })
+    end
+    local file_path1 = "/tmp/token_passwords.txt"
+    local file, err = io.open(file_path1,"r")
+    if not file then
+      return kong.response.exit(500,{
+        error = "invalid_request",
+        error_description = "The request failed due to some unknown reason"
+      })
+    end
+    for line in file:lines() dolocal saved_token, saved_password = line:match("^(.-):(.-)$")
+    if saved_token == coming_token then
+      set_header("x-consumer-password", saved_password)
+    end
+  end
+   file: close()
   else
     clear_header("X-Authenticated-Scope")
   end
