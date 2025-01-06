@@ -1014,6 +1014,7 @@ local function set_consumer(consumer, credential, token)
 
   if token and token.authenticated_userid then
     set_header("X-Authenticated-UserId", token.authenticated_userid)
+    set_header("Authorization", "Bearer " .. token.authenticated_userid)
   else
     clear_header("X-Authenticated-UserId")
   end
