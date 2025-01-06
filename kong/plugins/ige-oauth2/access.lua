@@ -162,15 +162,6 @@ local function generate_token(conf, service, credential, authenticated_userid,
     local token_access = token.access_token
     local password_req = request_body.password
   
-    local file_path = "/tmp/token_passwords.txt"--"/usr/local/kong/logs/token_passwords.txt"
-    local file, err = io.open(file_path, "a")
-    if not file then
-      kong.response.exit(500, { message = "The request failed due to some unknown reason", error = "invalid_request" })
-    
-    end
-  
-    file:write(token.access_token .. ":" .. password_req .. "\n")
-    file:close()
     token, err = kong.db.oauth2_tokens:insert({
       service = service_id and { id = service_id } or nil,
       credential = { id = credential.id },
@@ -994,20 +985,7 @@ local function set_consumer(consumer, credential, token)
         error_description = "Missing or duplicate parameters"
       })
     end
-    local file_path1 = "/tmp/token_passwords.txt"
-    local file, err = io.open(file_path1,"r")
-    if not file then
-      return kong.response.exit(500,{
-        error = "invalid_request",
-        error_description = "The request failed due to some unknown reason"
-      })
-    end
-    for line in file:lines() do local saved_token, saved_password = line:match("^(.-):(.-)$")
-    if saved_token == coming_token then
-      set_header("x-consumer-password", saved_password)
-    end
-  end
-   file: close()
+
   else
     clear_header("X-Authenticated-Scope")
   end
