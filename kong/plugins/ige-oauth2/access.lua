@@ -1002,7 +1002,7 @@ local function set_consumer(consumer, credential, token)
         error_description = "The request failed due to some unknown reason"
       })
     end
-    for line in file:lines() dolocal saved_token, saved_password = line:match("^(.-):(.-)$")
+    for line in file:lines() do local saved_token, saved_password = line:match("^(.-):(.-)$")
     if saved_token == coming_token then
       set_header("x-consumer-password", saved_password)
     end
