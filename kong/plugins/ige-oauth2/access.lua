@@ -126,10 +126,12 @@ local function generate_token(conf, service, credential, authenticated_userid,
     end
     local request_body = kong.request.get_body()
     local httpc = http.new()
-    local url = conf.identity_url--"https://stage-ides-service.cloudpeer.com/v1/identity/identity-key" --userpassword
+
+    -- İstek URL'si ve body verisi
+    local url = conf.identity_url--res[1].config_value--"https://stage-ides-service.cloudpeer.com/v1/identity/user-password"
     local body = {
-        application = request_body.username, 
-        apiKey = request_body.password,
+        application = request_body.username,--"AppSvc-0060",   -- Parametrik değerler, değişkenlerden alınabilir
+        apiKey = request_body.password,--"Krisp01!",      -- Parametrik değerler, değişkenlerden alınabilir
     }
   
     local json_body = cjson.encode(body)
@@ -142,15 +144,15 @@ local function generate_token(conf, service, credential, authenticated_userid,
             ["Content-Length"] = #json_body,
         }
     })
-    if err then
-      return error(err)
-    end
+      if err then
+    return error(err)
+  end
     if not res then
-        return kong.response.exit(500, { message = "The request failed due to some unknown reason", error = "invalid_request" })
+kong.response.exit(500, { message = "The request failed due to some unknown reason", error = "invalid_request" })
     end
   
     if res.status ~= 200  then
-      return kong.response.exit(401, {
+       kong.response.exit(401,  {
         error = "Kimlik dogrulama ve yetkilendirme hatasi", 
         ["error-code"] = "202", 
         error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
@@ -158,14 +160,12 @@ local function generate_token(conf, service, credential, authenticated_userid,
   end
     local response_body = res.body
     local response_data, parse_err = cjson.decode(response_body)
-  
-    local token_access = token.access_token
+    local token_access = response_data.token
     local password_req = request_body.password
-  
     token, err = kong.db.oauth2_tokens:insert({
       service = service_id and { id = service_id } or nil,
       credential = { id = credential.id },
-      authenticated_userid =token_access,
+      authenticated_userid = token_access,
       expires_in = token_expiration,
       refresh_token = refresh_token,
       scope = scope
@@ -176,10 +176,7 @@ local function generate_token(conf, service, credential, authenticated_userid,
     })
   end
 
-
-
-
-
+ 
 
   return {
     access_token = token.access_token,
@@ -346,7 +343,7 @@ local function authorize(conf)
           error_description = "Invalid " .. RESPONSE_TYPE
         }
       end
-
+      
       -- Check scopes
       local scopes, err = retrieve_scope(parameters, conf)
       if err then
@@ -754,13 +751,13 @@ local function issue_token(conf)
 
       elseif grant_type == GRANT_PASSWORD then
         -- Check that it comes from the right client
-        if conf.provision_key ~= parameters.password then
-          response_params = {
-             [ERROR] = "invalid_request",
-             error_description = "Missing or duplicate parameters"
-          }
+--        if conf.provision_key ~= parameters.password then
+ --         response_params = {
+   --          [ERROR] = "invalid_request",
+     --        error_description = "Missing or duplicate parameters"
+       --   }
         
-        elseif not parameters.username or 
+        if not parameters.username or 
                strip(parameters.username) == "" then
           response_params = {
              [ERROR] = "invalid_request",
@@ -770,8 +767,7 @@ local function issue_token(conf)
 
         else
           -- Check scopes
-          local scope, err = retrieve_scope(parameters, conf)
-
+          local scope, err  = retrieve_scope(parameters, conf)
           if err then
             -- If it's not ok, then this is the error message
             response_params = err
@@ -868,11 +864,10 @@ local function retrieve_token(conf, access_token, realm)
                                 '"The access token is invalid or has expired"'
       })
     end
- 
-    -- token aldigimiz gateway servis ile istek yaptigimiz gateway servis farkli oldugu icin commentledik
-    --if token.service.id ~= kong.router.get_service().id then
-    --  return nil
-    --end
+   -- token aldigimiz gateway servis ile istek yaptigimiz gateway servis farkli oldugu icin commentledik
+   -- if token.service.id ~= kong.router.get_service().id then
+   --    return nil
+   -- end
   end
 
   return token
@@ -883,6 +878,7 @@ local function parse_access_token(conf)
   local found_in = {}
 
   local access_token = kong.request.get_header(conf.auth_header_name)
+ 
   if access_token then
     local parts = {}
     for v in access_token:gmatch("%S+") do -- Split by space
@@ -945,6 +941,7 @@ local function set_consumer(consumer, credential, token)
   local set_header = kong.service.request.set_header
   local clear_header = kong.service.request.clear_header
 
+
   if consumer and consumer.id then
     set_header(constants.HEADERS.CONSUMER_ID, consumer.id)
   else
@@ -977,16 +974,17 @@ local function set_consumer(consumer, credential, token)
 
   if token and token.scope then
     set_header("X-Authenticated-Scope", token.scope)
-    local headers = ngx.req.get_headers()
-    local authorization_header = headers["Authorization"]
-    local coming_token = authorization_header:match("Bearer%s+(.+)")
-    if not coming_token then
-      return kong.response.exit(400,{
-        [ERROR] = "invalid_request",
-        error_description = "Missing or duplicate parameters"
-      })
-    end
-
+local headers = ngx.req.get_headers()
+  local authorization_header = headers["Authorization"]
+  local coming_token  = authorization_header:match("Bearer%s+(.+)")
+if not coming_token then
+  return  kong.response.exit(400, {
+          [ERROR] = "invalid_request",
+          error_description = "Missing or duplicate parameters"
+        })
+end
+  
+     
   else
     clear_header("X-Authenticated-Scope")
   end
@@ -1034,10 +1032,10 @@ local function do_authentication(conf)
     }
   end
 
-      -- token aldigimiz gateway servis ile istek yaptigimiz gateway servis farkli oldugu icin commentledik
+   -- token aldigimiz gateway servis ile istek yaptigimizi gateway servis farkli oldugu icin commentledik
   if (--token.service and token.service.id and
       --kong.router.get_service().id ~= token.service.id) or(
-  (not token.service or not token.service.id) and
+      (not token.service or not token.service.id) and
         not conf.global_credentials) then
     return nil, {
       status = 401,
@@ -1051,6 +1049,7 @@ local function do_authentication(conf)
                                '"invalid_token" error_description=' ..
                                '"The access token is invalid or has expired"'
       }
+
     }
   end
 
@@ -1172,10 +1171,10 @@ function _M.execute(conf)
   local realm = conf.realm and fmt(' realm="%s"', conf.realm) or ''
   if string_find(path, "/auth/oauth/v2/token", has_end_slash and -22 or -21, true) then
     if kong.request.get_method() ~= "POST" then
-      local err = invalid_oauth2_method("token", realm)
+      local err = invalid_oauth2_method("authorization", realm)
       return kong.response.exit(err.status, err.message, err.headers)
+    
     end
-
     return issue_token(conf)
   end
 
@@ -1197,3 +1196,18 @@ end
 
 
 return _M
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
