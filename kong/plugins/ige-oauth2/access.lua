@@ -868,10 +868,11 @@ local function retrieve_token(conf, access_token, realm)
                                 '"The access token is invalid or has expired"'
       })
     end
-
-    if token.service.id ~= kong.router.get_service().id then
-      return nil
-    end
+ 
+    -- token aldigimiz gateway servis ile istek yaptigimiz gateway servis farkli oldugu icin commentledik
+    --if token.service.id ~= kong.router.get_service().id then
+    --  return nil
+    --end
   end
 
   return token
@@ -1033,9 +1034,10 @@ local function do_authentication(conf)
     }
   end
 
-  if (token.service and token.service.id and
-      kong.router.get_service().id ~= token.service.id) or
-      ((not token.service or not token.service.id) and
+      -- token aldigimiz gateway servis ile istek yaptigimiz gateway servis farkli oldugu icin commentledik
+  if (--token.service and token.service.id and
+      --kong.router.get_service().id ~= token.service.id) or(
+  (not token.service or not token.service.id) and
         not conf.global_credentials) then
     return nil, {
       status = 401,
