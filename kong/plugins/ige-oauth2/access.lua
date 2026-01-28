@@ -180,10 +180,10 @@ kong.response.exit(500, { message = "The request failed due to some unknown reas
 
   return {
     access_token = token.access_token,
-    token_type = "bearer",
+    token_type = "Bearer", -- KKB ile ayni olmasi icin bearer->Bearer
     expires_in = token_expiration > 0 and token.expires_in or nil,
     refresh_token = refresh_token,
-    state = state, -- If state is nil, this value won't be added
+    state = nil, --If state is nil, this value won't be added KKB ile ayni olmasi icin state->nil
     scope = scope
   }
 end
@@ -436,7 +436,7 @@ local function authorize(conf)
   end
 
   -- Adding the state if it exists. If the state == nil then it won't be added
-  response_params.state = state
+  response_params.state = nil
 
   -- Appending kong generated params to redirect_uri query string
   if parsed_redirect_uri then
@@ -820,7 +820,7 @@ local function issue_token(conf)
   end
 
   -- Adding the state if it exists. If the state == nil then it won't be added
-  response_params.state = state
+  response_params.state = nil
 
   -- Sending response in JSON format
   return kong.response.exit(response_params[ERROR] and
