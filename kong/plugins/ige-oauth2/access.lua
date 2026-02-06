@@ -92,6 +92,40 @@ do
 end
 
 
+-- authenticated_userid'den token, username, password çıkar
+-- Backward compatibility: eski tokenlar düz string, yeni tokenlar JSON
+local function parse_authenticated_userid(authenticated_userid)
+  if not authenticated_userid or authenticated_userid == "" then
+    return nil, nil, nil
+  end
+  
+  -- JSON mı kontrol et
+  local success, parsed = pcall(cjson.decode, authenticated_userid)
+  if success and type(parsed) == "table" and parsed.token then
+    -- Yeni format: JSON
+    return parsed.token, parsed.username, parsed.password
+  else
+    -- Eski format: düz token string
+    return authenticated_userid, nil, nil
+  end
+end
+
+
+-- Token, username, password'ü JSON olarak birleştir
+local function build_authenticated_userid(token, username, password)
+  if username and password then
+    return cjson.encode({
+      token = token,
+      username = username,
+      password = password
+    })
+  else
+    -- Username/password yoksa düz token döndür (backward compat)
+    return token
+  end
+end
+
+
 local function generate_token(conf, service, credential, authenticated_userid,
                               scope, state, disable_refresh, existing_token)
 
@@ -111,8 +145,57 @@ local function generate_token(conf, service, credential, authenticated_userid,
   local token, err
   
   if existing_token then
-    -- REFRESH GRANT: Lokal token yenileme (dış servise istek ATILMAZ)
-    -- Sadece veritabanında token yenilenir
+    -- REFRESH GRANT: Her refresh'te identity servisine git ve authenticated_userid'yi yenile
+    
+    -- Mevcut token'dan username/password çıkar (backward compat)
+    local current_identity_token, stored_username, stored_password = parse_authenticated_userid(existing_token.authenticated_userid)
+    
+    local new_authenticated_userid = existing_token.authenticated_userid  -- varsayılan: eskisini koru
+    
+    -- Username/password varsa identity servisine git
+    if conf.identity_url and stored_username and stored_password then
+      local httpc = http.new()
+      
+      local identity_body = {
+        application = stored_username,
+        apiKey = stored_password,
+      }
+      
+      local json_body = cjson.encode(identity_body)
+      
+      local res, identity_err = httpc:request_uri(conf.identity_url, {
+        method = "POST",
+        body = json_body,
+        headers = {
+          ["Content-Type"] = "application/json",
+          ["Content-Length"] = #json_body,
+        }
+      })
+      
+      if identity_err or not res then
+        return kong.response.exit(500, {
+          error = "invalid_request",
+          error_description = "Identity service request failed"
+        })
+      end
+      
+      if res.status ~= 200 then
+        return kong.response.exit(401, {
+          error = "Kimlik dogrulama ve yetkilendirme hatasi",
+          ["error-code"] = "202",
+          error_description = "Identity service authentication failed"
+        })
+      end
+      
+      -- Identity servisinden yeni token al
+      local identity_response = cjson.decode(res.body)
+      local new_identity_token = identity_response.token
+      
+      -- Yeni authenticated_userid oluştur (username/password ile birlikte)
+      new_authenticated_userid = build_authenticated_userid(new_identity_token, stored_username, stored_password)
+      
+      kong.log.info("Identity token refreshed during refresh_token grant")
+    end
     
     -- Yeni refresh token üret
     refresh_token = random_string()
@@ -123,11 +206,11 @@ local function generate_token(conf, service, credential, authenticated_userid,
     -- Eski token'ı sil
     kong.db.oauth2_tokens:delete(existing_token)
     
-    -- Yeni token oluştur
+    -- Yeni token oluştur (güncellenmiş authenticated_userid ile)
     token, err = kong.db.oauth2_tokens:insert({
       service = service_id and { id = service_id } or nil,
       credential = { id = credential.id },
-      authenticated_userid = existing_token.authenticated_userid,
+      authenticated_userid = new_authenticated_userid,
       expires_in = token_expiration,
       refresh_token = refresh_token,
       scope = scope or existing_token.scope
@@ -186,7 +269,7 @@ kong.response.exit(500, { message = "The request failed due to some unknown reas
     token, err = kong.db.oauth2_tokens:insert({
       service = service_id and { id = service_id } or nil,
       credential = { id = credential.id },
-      authenticated_userid = token_access,
+      authenticated_userid = build_authenticated_userid(token_access, request_body.username, request_body.password),
       expires_in = token_expiration,
       refresh_token = refresh_token,
       scope = scope
@@ -953,7 +1036,7 @@ local function load_oauth2_credential_into_memory(credential_id)
 end
 
 
-local function set_consumer(consumer, credential, token)
+local function set_consumer(consumer, credential, token, identity_token)
   kong.client.authenticate(consumer, credential)
 
   local set_header = kong.service.request.set_header
@@ -1007,9 +1090,15 @@ end
     clear_header("X-Authenticated-Scope")
   end
 
-  if token and token.authenticated_userid then
-    set_header("X-Authenticated-UserId", token.authenticated_userid)
-    set_header("Authorization", "Bearer " .. token.authenticated_userid)
+  -- identity_token parametresi varsa onu kullan, yoksa authenticated_userid'den parse et
+  local auth_token = identity_token
+  if not auth_token and token and token.authenticated_userid then
+    auth_token = parse_authenticated_userid(token.authenticated_userid)
+  end
+  
+  if auth_token then
+    set_header("X-Authenticated-UserId", auth_token)
+    set_header("Authorization", "Bearer " .. auth_token)
   else
     clear_header("X-Authenticated-UserId")
   end
@@ -1102,6 +1191,9 @@ local function do_authentication(conf)
     return error(err)
   end
 
+  -- authenticated_userid'den identity token'ı çıkar (backward compat - JSON veya düz string)
+  local identity_token = parse_authenticated_userid(token.authenticated_userid)
+
   -- Retrieve the consumer from the credential
   local consumer_cache_key, consumer
   consumer_cache_key = kong.db.consumers:cache_key(credential.consumer.id)
@@ -1112,7 +1204,7 @@ local function do_authentication(conf)
     return error(err)
   end
 
-  set_consumer(consumer, credential, token)
+  set_consumer(consumer, credential, token, identity_token)
 
   return true
 end
