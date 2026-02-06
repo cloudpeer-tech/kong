@@ -109,21 +109,34 @@ local function generate_token(conf, service, credential, authenticated_userid,
 
   local refresh_token
   local token, err
-  if existing_token and conf.reuse_refresh_token then
-    token, err = kong.db.oauth2_tokens:update(existing_token, {
-      access_token = random_string(),
+  
+  if existing_token then
+    -- REFRESH GRANT: Lokal token yenileme (dış servise istek ATILMAZ)
+    -- Sadece veritabanında token yenilenir
+    
+    -- Yeni refresh token üret
+    refresh_token = random_string()
+    
+    -- Sabit 1 saat expiration (KKB spesifikasyonu)
+    token_expiration = 3600
+    
+    -- Eski token'ı sil
+    kong.db.oauth2_tokens:delete(existing_token)
+    
+    -- Yeni token oluştur
+    token, err = kong.db.oauth2_tokens:insert({
+      service = service_id and { id = service_id } or nil,
+      credential = { id = credential.id },
+      authenticated_userid = existing_token.authenticated_userid,
       expires_in = token_expiration,
-      created_at = timestamp.get_utc() / 1000
+      refresh_token = refresh_token,
+      scope = scope or existing_token.scope
     }, {
-      -- Access tokens (and their associated refresh token) are being
-      -- permanently deleted after 'refresh_token_ttl' seconds
       ttl = token_expiration > 0 and refresh_token_ttl or nil
     })
-    refresh_token = token.refresh_token  -- required for output
+    
   else
-    if not disable_refresh and token_expiration > 0 then
-      refresh_token = random_string()
-    end
+    -- PASSWORD GRANT: Identity servisine git
     local request_body = kong.request.get_body()
     local httpc = http.new()
 
@@ -162,6 +175,14 @@ kong.response.exit(500, { message = "The request failed due to some unknown reas
     local response_data, parse_err = cjson.decode(response_body)
     local token_access = response_data.token
     local password_req = request_body.password
+    
+    -- Identity servisinden refresh_token geldiyse onu kullan, yoksa random üret
+    if response_data.refresh_token then
+      refresh_token = response_data.refresh_token
+    elseif not disable_refresh and token_expiration > 0 then
+      refresh_token = random_string()
+    end
+    
     token, err = kong.db.oauth2_tokens:insert({
       service = service_id and { id = service_id } or nil,
       credential = { id = credential.id },
@@ -793,15 +814,15 @@ local function issue_token(conf)
 
         if not token or (service_id and service_id ~= token.service.id) then
           response_params = {
-             [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+             [ERROR] = "invalid_grant",
+              error_description = "The given grant is invalid"
           }
 
         -- Check that the token belongs to the client application
         elseif token.credential.id ~= client.id then
             response_params = {
-              [ERROR] = "invalid_request",
-              error_description = "Missing or duplicate parameters"
+              [ERROR] = "invalid_grant",
+              error_description = "The given grant is invalid"
             }
 
         else
@@ -810,10 +831,7 @@ local function issue_token(conf)
                                              client,
                                              token.authenticated_userid,
                                              token.scope, state, false, token)
-            -- Delete old token if refresh token not persisted
-            if not conf.reuse_refresh_token then
-              kong.db.oauth2_tokens:delete(token)
-            end
+            -- Eski token generate_token içinde siliniyor (KKB'de zaten geçersiz)
           end
       end
     end
