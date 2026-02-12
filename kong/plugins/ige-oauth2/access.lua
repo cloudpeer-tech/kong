@@ -203,8 +203,50 @@ local function generate_token(conf, service, credential, authenticated_userid,
     -- Sabit 1 saat expiration (KKB spesifikasyonu)
     token_expiration = 3600
     
-    -- Eski token'ı sil
-    kong.db.oauth2_tokens:delete(existing_token)
+    -- Eski token'i DB'den sil ve tum worker'lardaki cache'i temizle
+    local old_access_token = existing_token.access_token
+    local old_token_id = existing_token.id
+    
+    kong.log.err("[ige-oauth2] REFRESH: START - credential_id=", credential.id, " old_token_id=", old_token_id, " old_access_token=", old_access_token)
+    
+    -- RAW SQL ile credential'a ait TUM tokenlari sil (Kong DAO bypass)
+    local delete_sql = "DELETE FROM oauth2_tokens WHERE credential_id = '" .. credential.id .. "'"
+    kong.log.err("[ige-oauth2] REFRESH: executing SQL: ", delete_sql)
+    local del_res, del_err = kong.db.connector:query(delete_sql)
+    if del_err then
+      kong.log.err("[ige-oauth2] REFRESH: RAW SQL DELETE failed: ", del_err)
+      -- Fallback: DAO ile dene
+      local _, dao_err = kong.db.oauth2_tokens:delete({ id = old_token_id })
+      if dao_err then
+        kong.log.err("[ige-oauth2] REFRESH: DAO DELETE also failed: ", dao_err)
+      end
+    else
+      kong.log.err("[ige-oauth2] REFRESH: RAW SQL DELETE success, affected rows=", del_res and del_res.affected_rows or "unknown")
+    end
+    
+    -- Cache invalidate (defense in depth)
+    if old_access_token then
+      local token_cache_key = kong.db.oauth2_tokens:cache_key(old_access_token)
+      kong.cache:invalidate(token_cache_key)
+    end
+    
+    -- RAW SQL ile verify: eski token gercekten silindi mi?
+    local verify_sql = "SELECT id, access_token FROM oauth2_tokens WHERE access_token = '" .. old_access_token .. "' LIMIT 1"
+    local verify_res, verify_err = kong.db.connector:query(verify_sql)
+    if verify_err then
+      kong.log.err("[ige-oauth2] REFRESH: verify query failed: ", verify_err)
+    elseif verify_res and #verify_res > 0 then
+      kong.log.err("[ige-oauth2] REFRESH: !!!CRITICAL!!! old token STILL EXISTS after RAW SQL DELETE! id=", verify_res[1].id)
+    else
+      kong.log.err("[ige-oauth2] REFRESH: VERIFIED - old token deleted successfully from DB")
+    end
+    
+    -- Credential'a ait kalan token var mi kontrol et
+    local remaining_sql = "SELECT count(*) as cnt FROM oauth2_tokens WHERE credential_id = '" .. credential.id .. "'"
+    local remaining_res = kong.db.connector:query(remaining_sql)
+    if remaining_res and remaining_res[1] then
+      kong.log.err("[ige-oauth2] REFRESH: remaining tokens for this credential: ", remaining_res[1].cnt)
+    end
     
     -- Yeni token oluştur (güncellenmiş authenticated_userid ile)
     token, err = kong.db.oauth2_tokens:insert({
@@ -264,6 +306,16 @@ kong.response.exit(500, { message = "The request failed due to some unknown reas
       refresh_token = response_data.refresh_token
     elseif not disable_refresh and token_expiration > 0 then
       refresh_token = random_string()
+    end
+    
+    -- PASSWORD GRANT: Credential'a ait TUM eski tokenlari sil (yeni token eskileri ezer)
+    kong.log.err("[ige-oauth2] PASSWORD_GRANT: deleting old tokens for credential_id=", credential.id)
+    local delete_sql = "DELETE FROM oauth2_tokens WHERE credential_id = '" .. credential.id .. "'"
+    local del_res, del_err = kong.db.connector:query(delete_sql)
+    if del_err then
+      kong.log.err("[ige-oauth2] PASSWORD_GRANT: RAW SQL DELETE failed: ", del_err)
+    else
+      kong.log.err("[ige-oauth2] PASSWORD_GRANT: RAW SQL DELETE success, deleted old tokens for credential")
     end
     
     token, err = kong.db.oauth2_tokens:insert({
@@ -668,14 +720,19 @@ local function issue_token(conf)
 
   else
     local grant_type = parameters[GRANT_TYPE]
-    if not (grant_type == GRANT_AUTHORIZATION_CODE or
+    if not grant_type or grant_type == "" then
+      response_params = {
+         [ERROR] = "invalid_request",
+         error_description = "Missing required parameter: grant_type"
+      }
+    elseif not (grant_type == GRANT_AUTHORIZATION_CODE or
             grant_type == GRANT_REFRESH_TOKEN or
             (conf.enable_client_credentials and
              grant_type == GRANT_CLIENT_CREDENTIALS) or
             (conf.enable_password_grant and grant_type == GRANT_PASSWORD)) then
       response_params = {
-         [ERROR] = "invalid_grant",
-         error_description = "The given grant is invalid"
+         [ERROR] = "unsupported_grant_type",
+         error_description = "Unsupported grant type: " .. tostring(grant_type)
       }
     end
 
@@ -887,35 +944,41 @@ local function issue_token(conf)
       elseif grant_type == GRANT_REFRESH_TOKEN then
         local refresh_token = parameters[REFRESH_TOKEN]
 
-        local service_id
-        if not conf.global_credentials then
-          service_id = (kong.router.get_service() or EMPTY).id
-        end
-
-        local token = refresh_token and
-                      kong.db.oauth2_tokens:select_by_refresh_token(refresh_token)
-
-        if not token or (service_id and service_id ~= token.service.id) then
+        if not refresh_token or refresh_token == "" then
           response_params = {
-             [ERROR] = "invalid_grant",
-              error_description = "The given grant is invalid"
+             [ERROR] = "invalid_request",
+              error_description = "Missing required parameter: refresh_token"
           }
+        else
+          local service_id
+          if not conf.global_credentials then
+            service_id = (kong.router.get_service() or EMPTY).id
+          end
 
-        -- Check that the token belongs to the client application
-        elseif token.credential.id ~= client.id then
+          local token = kong.db.oauth2_tokens:select_by_refresh_token(refresh_token)
+
+          if not token or (service_id and service_id ~= token.service.id) then
             response_params = {
-              [ERROR] = "invalid_grant",
-              error_description = "The given grant is invalid"
+               [ERROR] = "invalid_grant",
+                error_description = "Refresh token is invalid, expired, or has been revoked"
             }
 
-        else
-         
-            response_params = generate_token(conf, kong.router.get_service(),
-                                             client,
-                                             token.authenticated_userid,
-                                             token.scope, state, false, token)
-            -- Eski token generate_token içinde siliniyor (KKB'de zaten geçersiz)
+          -- Check that the token belongs to the client application
+          elseif token.credential.id ~= client.id then
+              response_params = {
+                [ERROR] = "invalid_grant",
+                error_description = "Refresh token was issued to another client"
+              }
+
+          else
+           
+              response_params = generate_token(conf, kong.router.get_service(),
+                                               client,
+                                               token.authenticated_userid,
+                                               token.scope, state, false, token)
+              -- Eski token generate_token içinde siliniyor (KKB'de zaten geçersiz)
           end
+        end
       end
     end
   end
@@ -924,9 +987,16 @@ local function issue_token(conf)
   response_params.state = nil
 
   -- Sending response in JSON format
-  return kong.response.exit(response_params[ERROR] and
-                            (invalid_client_properties and
-                             invalid_client_properties.status or 400) or 200,
+  local error_status = 400
+  if response_params[ERROR] then
+    if invalid_client_properties and invalid_client_properties.status then
+      error_status = invalid_client_properties.status
+    elseif response_params[ERROR] == "invalid_grant" then
+      error_status = 401
+    end
+  end
+
+  return kong.response.exit(response_params[ERROR] and error_status or 200,
                              response_params, {
                                ["cache-control"] = "no-store",
                                ["pragma"] = "no-cache",
@@ -943,12 +1013,54 @@ end
 
 
 local function retrieve_token(conf, access_token, realm)
-  local token_cache_key = kong.db.oauth2_tokens:cache_key(access_token)
-  local token, err = kong.cache:get(token_cache_key, nil, load_token, access_token)
-  if err then
-    return error(err)
+  -- Token dogrulamada her zaman DB'den oku.
+  -- Revoke edilen tokenlar aninda gecersiz olur, cache stale riski sifir.
+  kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: checking access_token=", access_token)
+  
+  -- RAW SQL ile dogrudan PostgreSQL'den kontrol et (tum Kong katmanlarini bypass)
+  local sql = "SELECT id, access_token, credential_id, service_id, authenticated_userid, scope, expires_in, created_at, token_type, refresh_token FROM oauth2_tokens WHERE access_token = '" .. access_token .. "' LIMIT 1"
+  local sql_res, sql_err = kong.db.connector:query(sql)
+  
+  if sql_err then
+    kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: RAW SQL error: ", sql_err, " - falling back to DAO")
+    -- Fallback to DAO
+    local token, err = load_token(access_token)
+    if err then return error(err) end
+    if not token then
+      kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: DAO also returned nil")
+      return
+    end
+    kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: DAO returned token id=", token.id)
+    
+    if not conf.global_credentials then
+      if not token.service then
+        return kong.response.exit(401, {
+          error = "Kimlik dogrulama ve yetkilendirme hatasi", 
+          ["error-code"] = "202", 
+          error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        },
+        {
+          ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
+                                  '"invalid_token" error_description=' ..
+                                  '"The access token is invalid or has expired"'
+        })
+      end
+    end
+    return token
   end
+  
+  if not sql_res or #sql_res == 0 then
+    kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: RAW SQL - token NOT FOUND in DB (returning 401)")
+    return
+  end
+  
+  kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: RAW SQL - token FOUND id=", sql_res[1].id, " credential_id=", sql_res[1].credential_id)
+  
+  -- DAO ile de al (Kong'un beklediği format için)
+  local token, err = load_token(access_token)
+  if err then return error(err) end
   if not token then
+    kong.log.err("[ige-oauth2] RETRIEVE_TOKEN: MISMATCH! RAW SQL found token but DAO returned nil!")
     return
   end
 
@@ -1127,9 +1239,9 @@ local function do_authentication(conf)
     return nil, {
       status = 401,
       message = {
-        error = "Kimlik dogrulama ve yetkilendirme hatasi",
+        error = "invalid_token",
         ["error-code"] = "202",
-        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        error_description = "The access token is invalid, expired, or has been revoked"
       },
       headers = {
         ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
@@ -1147,9 +1259,9 @@ local function do_authentication(conf)
     return nil, {
       status = 401,
       message = {
-        error = "Kimlik dogrulama ve yetkilendirme hatasi",
+        error = "invalid_token",
         ["error-code"] = "202",
-        error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+        error_description = "The access token is not valid for this service"
       },
       headers = {
         ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
@@ -1167,9 +1279,9 @@ local function do_authentication(conf)
       return nil, {
         status = 401,
         message = {
-          error = "Kimlik dogrulama ve yetkilendirme hatasi",
+          error = "invalid_token",
           ["error-code"] = "202",
-          error_description = "scope, username, password, client_id, client_secret girdilerinizi kontrol ediniz"
+          error_description = "The access token has expired"
         },
         headers = {
           ["WWW-Authenticate"] = 'Bearer' .. realm .. ' error=' ..
